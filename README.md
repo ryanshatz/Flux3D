@@ -4,7 +4,7 @@
 
 **Walk through your IVR call flows in an immersive 3D environment**
 
-[🚀 **Try it Now →**](https://ryanshatz.github.io/flux3d/)
+[🚀 **Try it Now →**](https://ryanshatz.github.io/Flux3d/)
 
 </div>
 
