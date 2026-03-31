@@ -40,6 +40,21 @@ export class SceneManager {
     this._currentParsedData = null;
     this._currentHeatData = null;
 
+    // Smooth hover animation state
+    this._hoverTargets = {}; // moduleId -> { scale: target, glow: target }
+    this._hoverCurrent = {}; // moduleId -> { scale: current, glow: current }
+    this._hoveredModule = null;
+    this._selectedModule = null;
+
+    // Tooltip element
+    this._tooltip = null;
+
+    // Traced path modules (for path highlighting)
+    this._tracedPath = new Set();
+
+    // Ground pulse rings
+    this._pulseRings = [];
+
     this._init();
   }
 
@@ -115,6 +130,13 @@ export class SceneManager {
     this.mouse = new THREE.Vector2();
     this.renderer.domElement.addEventListener('click', (e) => this._onMouseClick(e));
     this.renderer.domElement.addEventListener('mousemove', (e) => this._onMouseMove(e));
+    this.renderer.domElement.addEventListener('dblclick', (e) => this._onDoubleClick(e));
+
+    // Create tooltip element
+    this._tooltip = document.createElement('div');
+    this._tooltip.className = 'module-tooltip';
+    this._tooltip.style.display = 'none';
+    document.body.appendChild(this._tooltip);
 
     // Tab key to toggle between orbit and 3rd person
     window.addEventListener('keydown', (e) => {
@@ -307,6 +329,25 @@ export class SceneManager {
     horizon.rotation.x = -Math.PI / 2;
     horizon.position.y = -1.9;
     this.scene.add(horizon);
+
+    // — Animated pulse rings on the ground —
+    this._pulseRings = [];
+    for (let i = 0; i < 3; i++) {
+      const ringGeo = new THREE.RingGeometry(15 + i * 25, 16 + i * 25, 64);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x0088cc,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = -1.85;
+      ring.userData.pulsePhase = i * (Math.PI * 2 / 3);
+      ring.userData.baseRadius = 15 + i * 25;
+      this.scene.add(ring);
+      this._pulseRings.push(ring);
+    }
   }
 
   // ═══ Graph Building ═══
@@ -338,7 +379,15 @@ export class SceneManager {
 
       const obj = this.moduleFactory.create(mod, heatData);
       obj.position.set(normX, height, normZ);
-      obj.userData = { moduleId: mod.moduleId, moduleType: mod.moduleType };
+      obj.userData = {
+        moduleId: mod.moduleId,
+        moduleType: mod.moduleType,
+        baseY: height,
+        floatOffset: Math.random() * Math.PI * 2,
+        floatSpeed: 0.8 + Math.random() * 0.6,
+        floatAmp: 0.15 + Math.random() * 0.15,
+        moduleName: mod.moduleName
+      };
 
       // — Drop shadow beneath module —
       this._addDropShadow(obj, normX, normZ);
@@ -347,6 +396,10 @@ export class SceneManager {
       obj.scale.setScalar(0);
       this.scene.add(obj);
       this.modules3D[mod.moduleId] = obj;
+
+      // Initialize hover animation state
+      this._hoverTargets[mod.moduleId] = { scale: 0.65, glow: 0 };
+      this._hoverCurrent[mod.moduleId] = { scale: 0, glow: 0 };
 
       const delay = idx * 40;
       const targetScale = 0.65;
@@ -359,7 +412,9 @@ export class SceneManager {
         const t = Math.min(elapsed / duration, 1);
         // Spring easing
         const spring = 1 - Math.pow(1 - t, 3) * Math.cos(t * Math.PI * 1.2);
-        obj.scale.setScalar(targetScale * Math.min(spring, 1));
+        const s = targetScale * Math.min(spring, 1);
+        obj.scale.setScalar(s);
+        this._hoverCurrent[mod.moduleId].scale = s;
         if (t < 1) requestAnimationFrame(animateIn);
       };
       requestAnimationFrame(animateIn);
@@ -678,6 +733,7 @@ export class SceneManager {
       let target = intersects[0].object;
       while (target && !target.userData.moduleId) target = target.parent;
       if (target?.userData.moduleId) {
+        this._selectedModule = target.userData.moduleId;
         // Click-to-navigate: walk avatar to clicked module
         if (this.controlMode === 'thirdPerson' && this.avatar) {
           const targetObj = this.modules3D[target.userData.moduleId];
@@ -689,8 +745,129 @@ export class SceneManager {
           this.onModuleClick(target.userData.moduleId);
         }
         this._highlightModule(target.userData.moduleId);
+        // Trace and highlight the full path through this module
+        this._tracePath(target.userData.moduleId);
+      }
+    } else {
+      // Click on empty space — clear selection and path
+      this._selectedModule = null;
+      this._tracedPath.clear();
+      this._resetAllCableOpacity();
+    }
+  }
+
+  _onDoubleClick(event) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+
+    const meshes = [];
+    Object.values(this.modules3D).forEach(obj => {
+      obj.traverse(child => { if (child.isMesh) meshes.push(child); });
+    });
+
+    const intersects = this.raycaster.intersectObjects(meshes, false);
+    if (intersects.length > 0) {
+      let target = intersects[0].object;
+      while (target && !target.userData.moduleId) target = target.parent;
+      if (target?.userData.moduleId) {
+        const targetObj = this.modules3D[target.userData.moduleId];
+        if (targetObj) {
+          if (this.controlMode === 'thirdPerson' && this.avatar) {
+            // Teleport avatar near the module
+            this.avatar.setPosition(targetObj.position.x, 0, targetObj.position.z + 15);
+          } else {
+            // Fly camera to the module
+            this._flyToModule(targetObj.position);
+          }
+        }
       }
     }
+  }
+
+  _flyToModule(targetPos) {
+    const startPos = this.camera.position.clone();
+    const endPos = new THREE.Vector3(targetPos.x + 20, targetPos.y + 25, targetPos.z + 35);
+    const startTarget = this.controls.target.clone();
+    const endTarget = targetPos.clone();
+    const duration = 1200;
+    const startTime = Date.now();
+
+    const animateCamera = () => {
+      const elapsed = Date.now() - startTime;
+      const t = Math.min(elapsed / duration, 1);
+      const ease = 1 - Math.pow(1 - t, 3); // cubic ease-out
+      this.camera.position.lerpVectors(startPos, endPos, ease);
+      this.controls.target.lerpVectors(startTarget, endTarget, ease);
+      this.controls.update();
+      if (t < 1) requestAnimationFrame(animateCamera);
+    };
+    animateCamera();
+  }
+
+  _tracePath(moduleId) {
+    this._tracedPath.clear();
+    if (!this._currentParsedData) return;
+    const { edges } = this._currentParsedData;
+
+    // Build adjacency maps
+    const downstream = {}; // from -> [to]
+    const upstream = {};   // to -> [from]
+    edges.forEach(e => {
+      if (!downstream[e.from]) downstream[e.from] = [];
+      downstream[e.from].push(e.to);
+      if (!upstream[e.to]) upstream[e.to] = [];
+      upstream[e.to].push(e.from);
+    });
+
+    // BFS downstream
+    const visited = new Set();
+    const queue = [moduleId];
+    visited.add(moduleId);
+    while (queue.length > 0) {
+      const current = queue.shift();
+      this._tracedPath.add(current);
+      (downstream[current] || []).forEach(next => {
+        if (!visited.has(next)) { visited.add(next); queue.push(next); }
+      });
+    }
+
+    // BFS upstream
+    const visitedUp = new Set([moduleId]);
+    const queueUp = [moduleId];
+    while (queueUp.length > 0) {
+      const current = queueUp.shift();
+      this._tracedPath.add(current);
+      (upstream[current] || []).forEach(prev => {
+        if (!visitedUp.has(prev)) { visitedUp.add(prev); queueUp.push(prev); }
+      });
+    }
+
+    // Highlight cables in the traced path
+    this.cables.forEach(cable => {
+      const inPath = this._tracedPath.has(cable.userData.fromId) && this._tracedPath.has(cable.userData.toId);
+      cable.traverse(child => {
+        if (child.isMesh && child.material) {
+          child.material.opacity = inPath ? 0.9 : 0.08;
+        }
+        if (child.isPoints && child.material) {
+          child.material.opacity = inPath ? 0.8 : 0.02;
+        }
+      });
+    });
+  }
+
+  _resetAllCableOpacity() {
+    this.cables.forEach(cable => {
+      cable.traverse(child => {
+        if (child.isMesh && child.material && child.material._baseOpacity !== undefined) {
+          child.material.opacity = child.material._baseOpacity;
+        } else if (child.isMesh && child.material) {
+          child.material.opacity = child.material.opacity; // keep current
+        }
+      });
+    });
   }
 
   _highlightModule(moduleId) {
@@ -742,43 +919,54 @@ export class SceneManager {
     });
     const intersects = this.raycaster.intersectObjects(meshes, false);
 
-    // Reset previous hover glow
-    if (this._hoveredModule) {
-      const prevObj = this.modules3D[this._hoveredModule];
-      if (prevObj) {
-        prevObj.traverse(child => {
-          if (child.isMesh && child.userData.isMainMesh) {
-            child.material.emissiveIntensity = child.userData.baseEmissive || 0.3;
-          }
-        });
-        prevObj.scale.setScalar(0.65); // Reset scale
-      }
-      // Reset cable opacity
-      this.cables.forEach(cable => {
-        cable.traverse(child => {
-          if (child.isMesh && child.material && child.material._baseOpacity !== undefined) {
-            child.material.opacity = child.material._baseOpacity;
-          }
-        });
-      });
+    // Clear previous hover target (set scale/glow targets back to resting)
+    if (this._hoveredModule && this._hoverTargets[this._hoveredModule]) {
+      this._hoverTargets[this._hoveredModule].scale = 0.65;
+      this._hoverTargets[this._hoveredModule].glow = 0;
       this._hoveredModule = null;
     }
+
+    // Hide tooltip by default
+    if (this._tooltip) this._tooltip.style.display = 'none';
 
     if (intersects.length > 0) {
       let target = intersects[0].object;
       while (target && !target.userData.moduleId) target = target.parent;
       if (target?.userData.moduleId) {
         this._hoveredModule = target.userData.moduleId;
-        const obj = this.modules3D[this._hoveredModule];
-        if (obj) {
-          // Hover glow
-          obj.traverse(child => {
-            if (child.isMesh && child.userData.isMainMesh) {
-              child.material.emissiveIntensity = 0.8;
-            }
-          });
-          // Slight scale bump
-          obj.scale.setScalar(0.70);
+
+        // Set smooth hover targets
+        if (this._hoverTargets[this._hoveredModule]) {
+          this._hoverTargets[this._hoveredModule].scale = 0.73;
+          this._hoverTargets[this._hoveredModule].glow = 1;
+        }
+
+        // Show tooltip
+        if (this._tooltip) {
+          const mod = this.moduleData[this._hoveredModule];
+          const name = target.userData.moduleName || mod?.moduleName || this._hoveredModule;
+          const type = target.userData.moduleType || mod?.moduleType || 'unknown';
+          const typeLabels = {
+            incomingCall: '📞 Incoming Call',
+            skillTransfer: '🎯 Skill Transfer',
+            case: '🔀 Case/Branch',
+            ifElse: '🔀 If/Else',
+            hangup: '📴 Hangup',
+            play: '🔊 Play Audio',
+            startOnHangup: '⚡ On Hangup',
+            voiceMailTransfer: '📧 Voicemail',
+            thirdPartyTransfer: '📱 3rd Party Transfer',
+            lookupCRMRecord: '🗄️ CRM Lookup',
+            crmUpdate: '📝 CRM Update',
+            agentTransfer: '👤 Agent Transfer',
+            setVariable: '⚙️ Set Variable',
+            blockedCallerList: '🛡️ Blocked Callers',
+          };
+          const typeLabel = typeLabels[type] || `📦 ${type}`;
+          this._tooltip.innerHTML = `<strong>${name}</strong><span class="tooltip-type">${typeLabel}</span>`;
+          this._tooltip.style.display = 'flex';
+          this._tooltip.style.left = `${event.clientX + 16}px`;
+          this._tooltip.style.top = `${event.clientY - 10}px`;
         }
       }
     }
@@ -812,14 +1000,61 @@ export class SceneManager {
       this.controls.update();
     }
 
-    // Animate modules
-    Object.values(this.modules3D).forEach(obj => {
-      if (obj.userData.moduleType === 'incomingCall') {
-        obj.position.y += Math.sin(elapsed * 1.5) * 0.02;
+    // ── Module Animations ──
+    const lerpSpeed = 6 * delta;
+    Object.entries(this.modules3D).forEach(([id, obj]) => {
+      const ud = obj.userData;
+
+      // Idle float — gentle sine bob unique per module
+      if (ud.baseY !== undefined) {
+        const floatY = Math.sin(elapsed * ud.floatSpeed + ud.floatOffset) * ud.floatAmp;
+        obj.position.y = ud.baseY + floatY;
       }
-      if (obj.userData.moduleType === 'case') {
+
+      // Spin case/ifElse wireframes
+      if (ud.moduleType === 'case' || ud.moduleType === 'ifElse') {
         obj.rotation.y += delta * 0.3;
       }
+
+      // Breathing glow on all main meshes
+      obj.traverse(child => {
+        if (child.isMesh && child.userData.isMainMesh) {
+          const baseGlow = child.userData.baseEmissive || 0.3;
+          const breathe = Math.sin(elapsed * 1.2 + (ud.floatOffset || 0)) * 0.08;
+          child.material.emissiveIntensity = baseGlow + breathe;
+        }
+        // Spin wireframe overlays
+        if (child.isMesh && child.userData.isWireframe) {
+          child.rotation.y += delta * 0.15;
+        }
+      });
+
+      // Smooth hover scale and glow transitions
+      const target = this._hoverTargets[id];
+      const current = this._hoverCurrent[id];
+      if (target && current) {
+        current.scale += (target.scale - current.scale) * Math.min(lerpSpeed, 1);
+        current.glow += (target.glow - current.glow) * Math.min(lerpSpeed, 1);
+        obj.scale.setScalar(current.scale);
+
+        // Apply hover glow boost
+        if (current.glow > 0.01) {
+          obj.traverse(child => {
+            if (child.isMesh && child.userData.isMainMesh) {
+              child.material.emissiveIntensity += current.glow * 0.5;
+            }
+          });
+        }
+      }
+    });
+
+    // ── Animate pulse rings on ground ──
+    this._pulseRings.forEach(ring => {
+      const phase = ring.userData.pulsePhase;
+      const t = (elapsed * 0.4 + phase) % (Math.PI * 2);
+      ring.material.opacity = Math.max(0, Math.sin(t) * 0.06);
+      const scaleF = 1 + Math.sin(t) * 0.15;
+      ring.scale.set(scaleF, scaleF, 1);
     });
 
     // Animate cables

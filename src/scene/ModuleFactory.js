@@ -28,7 +28,8 @@ export class ModuleFactory {
     const group = new THREE.Group();
     group.userData = {
       moduleId: mod.moduleId,
-      moduleType: mod.moduleType
+      moduleType: mod.moduleType,
+      floatOffset: Math.random() * Math.PI * 2
     };
 
     const colors = MODULE_COLORS[mod.moduleType] || MODULE_COLORS.startOnHangup;
@@ -222,6 +223,7 @@ export class ModuleFactory {
     });
     const wire = new THREE.Mesh(wireGeo, wireMat);
     wire.position.y = 5;
+    wire.userData.isWireframe = true;
     group.add(wire);
 
     // Vertical stem

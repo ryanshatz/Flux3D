@@ -1,11 +1,32 @@
 /**
  * CableRenderer — Draws orthogonal 3D cables between modules
- * Uses Manhattan routing (90° turns) with smooth rounded corners
- * Directional arrows along the cable show flow direction
+ * Features: Manhattan routing, smooth rounded corners, animated flow particles,
+ * electric pulse wave, and directional indicators
  */
 import * as THREE from 'three';
 
 export class CableRenderer {
+  constructor() {
+    // Create shared glow sprite texture for flow particles
+    this._flowTexture = this._createFlowTexture();
+  }
+
+  _createFlowTexture() {
+    const c = document.createElement('canvas');
+    c.width = 32;
+    c.height = 32;
+    const ctx = c.getContext('2d');
+    const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
+    grad.addColorStop(0.3, 'rgba(255, 255, 255, 0.6)');
+    grad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 32, 32);
+    const tex = new THREE.CanvasTexture(c);
+    tex.needsUpdate = true;
+    return tex;
+  }
+
   create(fromPos, toPos, options = {}) {
     const { type = 'primary', volume = 0.5, isFriction = false, isSuccess = false, dimMode = false, edgeIndex = 0, totalEdges = 1 } = options;
 
@@ -51,6 +72,7 @@ export class CableRenderer {
       transparent: true,
       opacity: dimMode ? 0.5 : (0.85 + volume * 0.15)
     });
+    tubeMat._baseOpacity = tubeMat.opacity;
     const tube = new THREE.Mesh(tubeGeo, tubeMat);
     group.add(tube);
 
@@ -62,21 +84,39 @@ export class CableRenderer {
         transparent: true,
         opacity: 0.04 + volume * 0.04
       });
+      glowMat._baseOpacity = glowMat.opacity;
       const glow = new THREE.Mesh(glowGeo, glowMat);
       group.add(glow);
     }
 
-    // Directional arrows along the cable (replace flow particles)
+    // Animated flow particles along the cable
     if (!dimMode) {
-      this._createDirectionArrows(group, curve, cableColor, emissiveColor, baseRadius);
+      this._createFlowParticles(group, curve, cableColor, volume);
     }
 
-    // Store update function for animation (subtle pulse only)
+    // Animated electric pulse wave (bright traveling spot)
+    const pulseSpeed = 0.3 + volume * 0.4;
+    const baseEmissiveIntensity = dimMode ? 0.2 : (0.5 + volume * 0.4);
+    const baseOpacity = tubeMat.opacity;
+
+    // Store update function for animation
     group.userData.update = (elapsed) => {
-      const pulse = Math.sin(elapsed * (2 + volume * 3)) * 0.1 + 0.6;
-      tubeMat.emissiveIntensity = (0.4 + volume * 0.4) * pulse;
+      // Cable breathing pulse
+      const breathe = Math.sin(elapsed * (1.5 + volume * 2)) * 0.12;
+      tubeMat.emissiveIntensity = baseEmissiveIntensity + breathe;
+
       if (isFriction) {
         tubeMat.emissiveIntensity = 0.6 + Math.sin(elapsed * 5) * 0.3;
+      }
+
+      // Electric pulse wave — brief opacity spike traveling along the tube
+      const pulseT = (elapsed * pulseSpeed) % 1.0;
+      const pulseIntensity = Math.exp(-50 * Math.pow(pulseT - 0.5, 2)) * 0.15;
+      tubeMat.opacity = baseOpacity + pulseIntensity;
+
+      // Animate flow particles
+      if (group.userData._flowParticles) {
+        this._updateFlowParticles(group.userData._flowParticles, curve, elapsed, volume);
       }
     };
 
@@ -84,38 +124,68 @@ export class CableRenderer {
   }
 
   /**
-   * Place arrow cones along the cable at regular intervals pointing in the flow direction
+   * Create animated particles that travel along the cable path
    */
-  _createDirectionArrows(group, curve, color, emissive, tubeRadius) {
-    const curveLength = curve.getLength();
-    // Place arrows every ~15 units, with min 1 and max 8
-    const arrowCount = Math.max(1, Math.min(8, Math.floor(curveLength / 15)));
-    const arrowSize = tubeRadius * 2.5;
+  _createFlowParticles(group, curve, color, volume) {
+    const particleCount = Math.max(3, Math.min(12, Math.floor(curve.getLength() / 8)));
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(particleCount * 3);
+    const phases = new Float32Array(particleCount);
 
-    const arrowGeo = new THREE.ConeGeometry(arrowSize, arrowSize * 3, 6);
-    const arrowMat = new THREE.MeshStandardMaterial({
+    // Initialize positions along the curve with random phases
+    for (let i = 0; i < particleCount; i++) {
+      phases[i] = i / particleCount;
+      const point = curve.getPointAt(phases[i]);
+      positions[i * 3] = point.x;
+      positions[i * 3 + 1] = point.y;
+      positions[i * 3 + 2] = point.z;
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+    const material = new THREE.PointsMaterial({
       color: color,
-      emissive: emissive,
-      emissiveIntensity: 0.8,
-      metalness: 0.5,
-      roughness: 0.3
+      size: 1.2 + volume * 1.5,
+      map: this._flowTexture,
+      transparent: true,
+      opacity: 0.5 + volume * 0.3,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true
     });
 
-    for (let i = 0; i < arrowCount; i++) {
-      // Distribute arrows evenly along the cable (skip first 10% and last 5%)
-      const t = 0.1 + (i / arrowCount) * 0.85;
-      const pos = curve.getPointAt(t);
-      const tangent = curve.getTangentAt(t).normalize();
+    const particles = new THREE.Points(geometry, material);
+    group.add(particles);
 
-      const arrow = new THREE.Mesh(arrowGeo, arrowMat);
-      arrow.position.copy(pos);
+    // Store reference for animation
+    group.userData._flowParticles = {
+      particles,
+      phases,
+      particleCount,
+      speed: 0.15 + volume * 0.25
+    };
+  }
 
-      // Orient cone along tangent direction
-      const up = new THREE.Vector3(0, 1, 0);
-      const quat = new THREE.Quaternion().setFromUnitVectors(up, tangent);
-      arrow.quaternion.copy(quat);
-      group.add(arrow);
+  /**
+   * Update flow particles — move them along the curve
+   */
+  _updateFlowParticles(flowData, curve, elapsed, volume) {
+    const { particles, phases, particleCount, speed } = flowData;
+    const positions = particles.geometry.attributes.position.array;
+
+    for (let i = 0; i < particleCount; i++) {
+      // Move particle along curve
+      const t = (phases[i] + elapsed * speed) % 1.0;
+      const point = curve.getPointAt(Math.max(0.001, Math.min(0.999, t)));
+      positions[i * 3] = point.x;
+      positions[i * 3 + 1] = point.y;
+      positions[i * 3 + 2] = point.z;
     }
+
+    particles.geometry.attributes.position.needsUpdate = true;
+
+    // Pulse particle size
+    particles.material.size = (1.0 + volume * 1.5) + Math.sin(elapsed * 3) * 0.3;
   }
 
   /**

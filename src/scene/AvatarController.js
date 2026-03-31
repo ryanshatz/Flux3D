@@ -14,13 +14,14 @@ export class AvatarController {
     this.velocity = new THREE.Vector3();
     this.rotation = 0; // Face toward -Z (into the scene)
     this.moveSpeed = 40;
+    this.currentSpeed = 0; // Smooth acceleration
     this.rotSpeed = 2.2;
     this.isMoving = false;
 
     // Camera follow
     this.cameraOffset = new THREE.Vector3(0, 14, 28);
     this.cameraLookAhead = 8;
-    this.cameraSmoothness = 4;
+    this.cameraSmoothness = 5;
     this.bobEnabled = true;
 
     // Camera bob
@@ -351,18 +352,25 @@ export class AvatarController {
 
     this.isMoving = moveDir.lengthSq() > 0;
 
+    // Smooth acceleration / deceleration
+    const targetSpeed = this.isMoving ? speed : 0;
+    const accelRate = this.isMoving ? 8 : 12; // Accelerate slower, decelerate faster
+    this.currentSpeed += (targetSpeed - this.currentSpeed) * Math.min(accelRate * delta, 1);
+
     if (this.isMoving) {
       moveDir.normalize();
-      this.velocity.copy(moveDir).multiplyScalar(speed * delta);
+      this.velocity.copy(moveDir).multiplyScalar(this.currentSpeed * delta);
       this.position.add(this.velocity);
 
-      // Face movement direction — negate both args because Three.js model faces -Z at rotation=0
+      // Face movement direction
       const targetRotation = Math.atan2(-moveDir.x, -moveDir.z);
-      // Smooth the rotation using short-way lerp
       let diff = targetRotation - this.rotation;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
       this.rotation += diff * Math.min(10 * delta, 1);
+    } else if (this.currentSpeed > 0.5) {
+      // Deceleration slide — keep moving in last direction
+      this.position.add(this.velocity.clone().multiplyScalar(this.currentSpeed / speed * 0.5));
     } else {
       this.velocity.set(0, 0, 0);
     }
@@ -484,6 +492,13 @@ export class AvatarController {
 
     const smoothing = this.cameraSmoothness * delta;
     this.camera.position.lerp(desiredCamPos.add(bobOffset), Math.min(smoothing, 1));
+
+    // Sprint camera shake — subtle random offsets
+    if (this.isMoving && this.keys.sprint) {
+      const shakeIntensity = 0.08;
+      this.camera.position.x += (Math.random() - 0.5) * shakeIntensity;
+      this.camera.position.y += (Math.random() - 0.5) * shakeIntensity * 0.5;
+    }
 
     // Smooth look-target (lerp instead of snap)
     const desiredLookTarget = this.position.clone().add(
