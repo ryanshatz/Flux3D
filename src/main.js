@@ -591,13 +591,14 @@ class Flux3D {
   _watchJourney() {
     if (!this._lastSimResult || this._lastSimResult.path.length === 0) return;
 
+    // Save before closing (close nulls _lastSimResult)
+    const path = [...this._lastSimResult.path];
+    const phone = this._lastSimPhone || '';
+
     this._closeSimModal();
 
     // Feed the simulation path to the tour system
-    this.sceneManager.startSimulationTour(
-      this._lastSimResult.path,
-      this._lastSimPhone
-    );
+    this.sceneManager.startSimulationTour(path, phone);
   }
 }
 
