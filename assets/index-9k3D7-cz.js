@@ -4091,4 +4091,4 @@ void main() {
           <div class="sim-log-detail">${s.detail}</div>
         </div>
         <span class="sim-log-action">${s.action}</span>
-      `,e.appendChild(a)})}_watchJourney(){!this._lastSimResult||this._lastSimResult.path.length===0||(this._closeSimModal(),this.sceneManager.startSimulationTour(this._lastSimResult.path,this._lastSimPhone))}}window.addEventListener("DOMContentLoaded",()=>{new XM});
+      `,e.appendChild(a)})}_watchJourney(){if(!this._lastSimResult||this._lastSimResult.path.length===0)return;const t=[...this._lastSimResult.path],e=this._lastSimPhone||"";this._closeSimModal(),this.sceneManager.startSimulationTour(t,e)}}window.addEventListener("DOMContentLoaded",()=>{new XM});
